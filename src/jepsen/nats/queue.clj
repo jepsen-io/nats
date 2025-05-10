@@ -35,6 +35,8 @@
                           (catch java.lang.IllegalStateException e
                             (info "Can't subscribe," (.getMessage e)))
                           (catch java.io.IOException e
+                            (info "Can't subscribe," (.getMessage e)))
+                          (catch io.nats.client.JetStreamApiException e
                             (info "Can't subscribe," (.getMessage e))))]
         (deliver subscription sub)))
     (when (realized? subscription)
@@ -207,8 +209,8 @@
        :unexpected-count   (count unexpected)
        :lost-count         (count lost)
        :recovered-count    (count recovered)
-       :lost               lost
-       :unexpected         unexpected})))
+       :lost               (into (sorted-set) (take 32 lost))
+       :unexpected         (into (sorted-set) (take 32 unexpected))})))
 
 (defn workload
   "Takes CLI options, returns a workload with a client and generator."

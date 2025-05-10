@@ -195,7 +195,7 @@
         (catch JetStreamApiException e#
           (Thread/sleep (rand-int 2000))
           (condp re-find (.getMessage e#)
-            #"Jetstream system temporarily unavailable"
+            #"(?i)jetstream system temporarily unavailable"
             (assoc ~op :type :fail, :error [:jetstream-temporarily-unavailable])
 
             (throw e#)))
