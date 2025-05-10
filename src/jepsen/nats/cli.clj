@@ -105,7 +105,9 @@
                            :pause         {:targets (:db-node-targets opts)}
                            :kill          {:targets (:db-node-targets opts)}
                            :packet        {:targets [:one :minority :all]
-                                           :behaviors [{:delay {}}]}})
+                                           :behaviors
+                                           [{:delay {:time   "100ms"
+                                                     :jitter "50ms"}}]}})
         workload-gen (->> (:generator workload)
                           (gen/stagger (/ (:rate opts)))
                           gen/clients)
