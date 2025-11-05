@@ -1,6 +1,7 @@
 (ns jepsen.nats.db
   "Database automation"
-  (:require [clojure [string :as str]]
+  (:require [cheshire.core :as json]
+            [clojure [string :as str]]
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [control :as c :refer [|]]
@@ -82,6 +83,51 @@
                                        (str "sync_interval: " s)
                                        ""))
       (cu/write-file! config-file)))
+
+(defn nats*!
+  "Runs a NATS CLI command without a user. NATS is weird: you can't administer
+  Jetstream using an admin user, because admin users can't have Jetstream
+  enabled. But you can't administer anything else using a regular user. So you
+  need two admin users? :-/"
+  [& args]
+  (apply c/exec :nats :-s c/*host* :--password "jepsenpw" :--timeout 100 args))
+
+(defn nats!
+  "Runs a NATS CLI command."
+  [& args]
+  (apply nats*! :--user "sys" args))
+
+(defn jetstream
+  "Requests Jetstream info from the current node, asking for the leader's view"
+  []
+  (-> (nats! :server :request :jetstream :--leader :--streams)
+      (json/parse-string true)))
+
+(defn jetstream-health
+  "Requests Jetstream health info from the current node."
+  []
+  (-> (nats! :server :request :jetstream-health)
+      (str/split #"\n")
+      (->> (mapv (fn [line]
+                   (:server (json/parse-string line true)))))))
+
+(defn leave!
+  "Tells NATS that the given node is gone."
+  [test node]
+  ; Zero clue how to do this safely. Probably involves parsing a zillion admin
+  ; commands.
+  (info "Telling" c/*host* "that" node "is gone")
+  (try (nats*! :--user "jepsen" :stream :cluster :peer-remove :-f
+          "jepsen-stream" node)
+       (finally
+         (nats! :server :raft :peer-remove :-f :-j node)))
+  :removed)
+
+(defn wipe!
+  "Kills and wipes data on a node."
+  [test node]
+  (db/kill! (:db test) test node)
+  (c/su (c/exec :rm :-rf data-dir)))
 
 (defrecord DB [peer-ids lazyfs]
   db/DB

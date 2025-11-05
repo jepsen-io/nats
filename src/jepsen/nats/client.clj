@@ -48,6 +48,7 @@
   ; I suspect Nats/connect may leak threads, so let's be extra careful here
   (let [opts (.. (Options/builder)
                  (server (str "nats://" node ":" port))
+                 (userInfo "jepsen" "jepsenpw")
                  (pingInterval (Duration/ofMillis 5000))
                  (connectionTimeout 5000)
                  (socketWriteTimeout 10000)

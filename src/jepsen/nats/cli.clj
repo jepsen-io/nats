@@ -33,7 +33,8 @@
     :pause
     :partition
     :packet
-    :clock})
+    :clock
+    :membership})
 
 (def db-node-targets
   "Different ways we can target single nodes for database faults."
@@ -53,7 +54,7 @@
    [:packet]
    [:clock]
    ; General chaos
-   [:partition :pause :kill :clock :packet]])
+   [:partition :pause :kill :clock :packet :membership]])
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults."
@@ -107,7 +108,8 @@
                            :packet        {:targets [:one :minority :all]
                                            :behaviors
                                            [{:delay {:time   "100ms"
-                                                     :jitter "50ms"}}]}})
+                                                     :jitter "50ms"}}]
+                                           }})
         workload-gen (->> (:generator workload)
                           (gen/stagger (/ (:rate opts)))
                           gen/clients)
