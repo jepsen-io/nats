@@ -2,7 +2,8 @@
   "A simple queue workload"
   (:require [clojure.set :as set]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [checker :as checker]
+            [jepsen [antithesis :as a]
+                    [checker :as checker]
                     [client :as client]
                     [generator :as gen]
                     [history :as h]
@@ -24,6 +25,21 @@
   (let [[m k] (re-find #"^jepsen\.(\d+)$" subject)]
     (assert m (str "unable to find key in subject " (pr-str subject)))
     (parse-long k)))
+
+(defn pair->process
+  "Takes a 'process.counter' pair and returns the process."
+  [pair]
+  (parse-long (re-find #"^\d+" pair)))
+
+(defn pair->counter
+  "Takes a 'process.counter' pair and returns the counter."
+  [pair]
+  (parse-long (re-find #"\d+$" pair)))
+
+(defn pair
+  "Constructs a pair string from a process and counter"
+  [process counter]
+  (str process "-" counter))
 
 (defn sub!
   "Takes a client, and tries to get its subscription, creating it if not
@@ -60,7 +76,7 @@
                          :replicas  (max 3
                                          (count (:nodes test)))})))
 
-  (invoke! [this test {:keys [f value] :as op}]
+  (invoke! [this test {:keys [f process value] :as op}]
     (c/with-errors op
       (case f
         ; Synthetic process crash
@@ -104,19 +120,74 @@
     ; within a few hundred seconds if we close and re-open
     true))
 
-(defn stop-when-caught-up
-  "Wraps a generator, ending it when an operation returns :error :caught-up"
+(defrecord TrackCounters [; The key we assign in the context
+                          context-key
+                          ; The set of :f's we care about
+                          fs
+                          ; A map of process to highest counter
+                          counters
+                          gen]
+  gen/Generator
+  (op [this test ctx]
+    (let [ctx' (assoc ctx context-key counters)]
+      (when-let [[op gen'] (gen/op gen test ctx')]
+        [op (TrackCounters. context-key fs counters gen')])))
+
+  (update [this test ctx {:keys [f type value] :as event}]
+    (if (and (identical? type :ok)
+             (contains? fs f))
+      (let [pairs   (case f
+                      :publish      [value]
+                      :next-message [value]
+                      :fetch        value)
+            counters' (reduce (fn [counters pair]
+                                (let [process (pair->process pair)
+                                      counter (max (pair->counter pair)
+                                                   (get counters process 0))]
+                                  (assoc counters process counter)))
+                              counters
+                              pairs)
+            ctx'      (assoc ctx context-key counters')
+            gen'      (gen/update gen test ctx' event)]
+        (TrackCounters. context-key fs counters' gen'))
+      ; Not interested, pass through
+      (let [ctx' (assoc ctx context-key counters)
+            gen' (gen/update gen test ctx' event)]
+        (TrackCounters. context-key fs counters gen')))))
+
+(defn track-writes
+  "Wraps a generator, tracking the counters written via :publish"
+  [gen]
+  (TrackCounters. :writes #{:publish} {} gen))
+
+(defn track-reads
+  "Wraps a generator, tracking the counters read via :next-message or :fetch"
+  [gen]
+  (TrackCounters. :reads #{:fetch :next-message} {} gen))
+
+(defn caught-up?
+  "Takes a generator context map, and returns true if the reads of that context
+  are at least as high, for each process, as the writes."
+  [{:keys [reads writes] :as ctx}]
+  (every? (fn [[process counter]]
+            (<= counter (get reads process -1)))
+          writes))
+
+(defn until-caught-up
+  "Wraps a generator, ending it when the generator has read, for each process,
+  a record at least as high as the highest record we know that process wrote."
   [gen]
   (gen/on-update
     (fn update [this test ctx op]
-      (if (= :caught-up (:error op))
-        nil ; Done
+      (if (caught-up? ctx)
+        (gen/log "Caught up")
+        ; Not done; propagate
         (-> gen
             (gen/update test ctx op)
-            stop-when-caught-up)))
+            until-caught-up)))
     gen))
 
-(defrecord StopWhenSubFails [deadline gen]
+(defrecord UntilSubFails [deadline gen]
   gen/Generator
   (op [this test ctx]
     (if-not deadline
@@ -137,23 +208,44 @@
                     (:final-time-limit test) " seconds"))
       (assoc this :gen (gen/update gen test ctx op)))))
 
-(defn stop-when-sub-fails
+(defn until-sub-fails
   "When subscriptions fail for more than the final time limit, stop trying."
   [gen]
-  (StopWhenSubFails. nil gen))
+  (UntilSubFails. nil gen))
 
 (defn drain
   "Emits dequeue opts until caught up on every thread."
   [opts]
   (gen/each-thread
     (->> (gen/repeat {:f :fetch})
-         stop-when-caught-up
-         stop-when-sub-fails)))
+         until-caught-up
+         until-sub-fails
+         track-reads)))
+
+; Our write generator emits process.some-int, where some-int is 0,1,2,... for
+; that process. This lets us do high-watermark tracking.
+(defrecord Writes [; A map of process -> next counter to emit
+                   next-counters]
+  gen/Generator
+  (op [this test ctx]
+    (if-let [p (gen/some-free-process ctx)]
+      (let [counter (get next-counters p 0)
+            ncs'    (assoc next-counters p (inc counter))]
+        [(h/->Op -1
+                (:time ctx)
+                :invoke
+                p
+                :publish
+                (pair p counter))
+         (Writes. ncs')])
+      [:pending this]))
+
+  (update [this test ctx event]
+    this))
 
 (defn generator
   [opts]
-  (let [writes (->> (range)
-                    (map (fn [x] {:f :publish, :value x})))
+  (let [writes (Writes. {})
         reads (repeat (:concurrency opts)
                        (gen/repeat {:f :fetch}))]
   ;(gen/mix (vec (cons writes reads)))
@@ -217,5 +309,6 @@
   [opts]
   {:generator       (generator opts)
    :final-generator (drain opts)
+   :wrap-generator  track-writes
    :client          (Client. nil nil)
-   :checker         (Checker.)})
+   :checker         (a/checker (Checker.))})

@@ -4,7 +4,8 @@
   (:require [clojure [pprint :refer [pprint]]
                      [string :as str]]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [checker :as checker]
+            [jepsen [antithesis :as a]
+                    [checker :as checker]
                     [cli :as cli]
                     [control :as control]
                     [generator :as gen]
@@ -116,39 +117,62 @@
         final-gen   (:final-generator workload)
         nemesis-gen (->> (:generator nemesis)
                          gen/nemesis)
-        gen (gen/phases
-              ; Main phase
-              (->> workload-gen
+        ; Main phase generator
+        gen (->> workload-gen
                    (gen/nemesis
                      (gen/phases
                        (gen/sleep (:initial-quiet-period opts))
-                       (:generator nemesis)))
-                   (gen/time-limit (:time-limit opts)))
+                       (:generator nemesis))))
+        ; Limit
+        gen (if (a/antithesis?)
+              (a/early-termination-generator {:interval 100} gen)
+              (gen/time-limit (:time-limit opts) gen))
+        ; And afterwards, recover and final gen
+        gen (gen/phases
+              gen
               ; Recover
               (gen/nemesis
                 [(:final-generator nemesis)
                  (gen/log "Beginning final generator")])
               ; Final gen
-              (gen/clients final-gen))]
-    (merge tests/noop-test
-           opts
-           {:name     (test-name opts)
-            :os       os
-            :db       db
-            :checker  (checker/compose
-                        {:perf       (checker/perf)
-                         :clock      (checker/clock-plot)
-                         :stats      (checker/stats)
-                         :exceptions (checker/unhandled-exceptions)
-                         :workload   (:checker workload)})
-            :client    (:client workload)
-            :nemesis   (:nemesis nemesis jepsen.nemesis/noop)
-            :plot      {:nemeses (:perf nemesis)}
-            :generator gen})))
+              (gen/clients final-gen))
+        ; And wrap
+        gen (if-let [wrap (:wrap-generator workload)]
+              (wrap gen)
+              gen)]
+    (-> tests/noop-test
+        (merge
+          opts
+          {:name     (test-name opts)
+           :os       os
+           :db       db
+           :checker  (checker/compose
+                       {:perf       (checker/perf)
+                        :clock      (checker/clock-plot)
+                        :stats      (checker/stats)
+                        :exceptions (checker/unhandled-exceptions)
+                        :workload   (:checker workload)})
+           :client    (a/client (:client workload))
+           :nemesis   (if (a/antithesis?)
+                        jepsen.nemesis/noop
+                        (:nemesis nemesis jepsen.nemesis/noop))
+           :plot      {:nemeses (:perf nemesis)}
+           :generator gen})
+        a/test)))
+
+(defn nats-test-with-antithesis
+  "Wraps nats-test for antithesis debugging"
+  [opts]
+  (if (:antithesis opts)
+    (with-redefs [a/antithesis? (constantly true)]
+      (nats-test opts))
+    (nats-test opts)))
 
 (def cli-opts
   "Command-line option specification"
-  [[nil "--concurrency NUMBER" "How many workers should we run? Must be an integer, optionally followed by n (e.g. 3n) to multiply by the number of nodes."
+  [[nil "--antithesis" "Forces Antithesis mode. Useful for debugging in local docker."]
+
+   [nil "--concurrency NUMBER" "How many workers should we run? Must be an integer, optionally followed by n (e.g. 3n) to multiply by the number of nodes."
     :default  "3n"
     :validate [(partial re-find #"^\d+n?$")
                "Must be an integer, optionally followed by n."]]
@@ -159,7 +183,7 @@
     :validate [(partial every? db-node-targets) (cli/one-of db-node-targets)]]
 
    [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
-    :default  20
+    :default  60
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
@@ -250,12 +274,13 @@
   "Handles command line arguments. Can either run a test, or a web server for
   browsing results."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn  nats-test
-                                         :opt-spec cli-opts})
-                   (cli/test-all-cmd
-                     {:tests-fn all-tests
-                      :opt-spec (cli/without-defaults-for
-                                  [:workload :nemesis :lazyfs]
-                                  cli-opts)})
-                   (cli/serve-cmd))
-            args))
+  (a/with-rng
+    (cli/run! (merge (cli/single-test-cmd {:test-fn  nats-test-with-antithesis
+                                           :opt-spec cli-opts})
+                     (cli/test-all-cmd
+                       {:tests-fn all-tests
+                        :opt-spec (cli/without-defaults-for
+                                    [:workload :nemesis :lazyfs]
+                                    cli-opts)})
+                     (cli/serve-cmd))
+              args)))

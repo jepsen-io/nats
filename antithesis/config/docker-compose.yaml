@@ -1,0 +1,86 @@
+version: '3.9'
+# I have no idea what I'm doing
+networks:
+  antithesis-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.10/24
+services:
+  control:
+    container_name: control
+    hostname: control
+    image: jepsen-nats-control:latest
+    init: true
+    networks:
+      antithesis-net:
+        ipv4_address: 10.0.0.100
+    volumes:
+      - ./volumes/store:/opt/jepsen-test/store
+    depends_on:
+      n1:
+        condition: service_started
+      n2:
+        condition: service_started
+      n3:
+        condition: service_started
+  # Note that n1 is special; the first node others join to
+  n1:
+    container_name: n1
+    hostname: n1
+    image: jepsen-nats-db:latest
+    command:
+      - "--server_name=n1"
+      - "--cluster_name=jepsen-cluster"
+      - "--cluster=nats://0.0.0.0:6222"
+      - "--routes=nats-route://n1:6222,nats-route://n2:6222,nats-route://n3:6222"
+      - "--js"
+      - "--http_port=8222"
+    #healthcheck:
+    #  test: ["CMD-SHELL", "netstat -ltnp | grep 2379"]
+    #  interval: 5s
+    #  timeout: 10s
+    init: true
+    networks:
+      antithesis-net:
+        ipv4_address: 10.0.0.11
+  n2:
+    container_name: n2
+    hostname: n2
+    image: jepsen-nats-db:latest
+    command:
+      - "--server_name=n2"
+      - "--cluster_name=jepsen-cluster"
+      - "--cluster=nats://0.0.0.0:6222"
+      - "--routes=nats-route://n1:6222,nats-route://n2:6222,nats-route://n3:6222"
+      - "--js"
+      - "--http_port=8222"
+    depends_on: ["n1"]
+    #healthcheck:
+    #  test: ["CMD-SHELL", "netstat -ltnp | grep 2379"]
+    #  interval: 5s
+    #  timeout: 10s
+    init: true
+    networks:
+      antithesis-net:
+        ipv4_address: 10.0.0.12
+  n3:
+    container_name: n3
+    hostname: n3
+    image: jepsen-nats-db:latest
+    command:
+      - "--server_name=n3"
+      - "--cluster_name=jepsen-cluster"
+      - "--cluster=nats://0.0.0.0:6222"
+      - "--routes=nats-route://n1:6222,nats-route://n2:6222,nats-route://n3:6222"
+      - "--js"
+      - "--http_port=8222"
+    depends_on: ["n1"]
+    #healthcheck:
+    #  test: ["CMD-SHELL", "netstat -ltnp | grep 2379"]
+    #  interval: 5s
+    #  timeout: 10s
+    init: true
+    networks:
+      antithesis-net:
+        ipv4_address: 10.0.0.13
