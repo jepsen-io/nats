@@ -146,6 +146,7 @@
     )
 
   (teardown! [this test node]
+    ; Always tear down, in case we have a previous, crashed state left over
     (db/teardown! lazyfs test node)
     (c/su (cu/grepkill! :kill bin-name)
           (c/exec :rm :-rf dir)))
