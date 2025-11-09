@@ -114,7 +114,6 @@
         workload-gen (->> (:generator workload)
                           (gen/stagger (/ (:rate opts)))
                           gen/clients)
-        final-gen   (:final-generator workload)
         nemesis-gen (->> (:generator nemesis)
                          gen/nemesis)
         ; Main phase generator
@@ -135,7 +134,9 @@
                 [(:final-generator nemesis)
                  (gen/log "Beginning final generator")])
               ; Final gen
-              (gen/clients final-gen))
+              (->> (:final-generator workload)
+                   (gen/time-limit (:final-time-limit opts))
+                   gen/clients))
         ; And wrap
         gen (if-let [wrap (:wrap-generator workload)]
               (wrap gen)

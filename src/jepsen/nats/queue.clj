@@ -1,14 +1,20 @@
 (ns jepsen.nats.queue
   "A simple queue workload"
-  (:require [clojure.set :as set]
+  (:require [clojure [pprint :refer [pprint]]
+                     [set :as set]]
             [clojure.tools.logging :refer [info warn]]
+            [dom-top.core :refer [loopr]]
             [jepsen [antithesis :as a]
                     [checker :as checker]
                     [client :as client]
                     [generator :as gen]
                     [history :as h]
-                    [util :refer [meh linear-time-nanos secs->nanos]]]
+                    [store :as store]
+                    [util :refer [meh linear-time-nanos
+                                  nanos->secs secs->nanos]]]
+            [jepsen.checker [perf :as perf]]
             [jepsen.nats [client :as c]]
+            [slingshot.slingshot :refer [try+ throw+]]
             [tesser.core :as t]))
 
 (def stream-name "jepsen-stream")
@@ -98,11 +104,9 @@
         :fetch
         (if-let [sub (sub! this)]
           (let [batch (c/fetch sub)]
-            (if (empty? batch)
-              (assoc op :type :fail, :error :caught-up)
-              (do ; Ack all
-                  (mapv c/ack! batch)
-                  (assoc op :type :ok, :value (mapv c/data batch)))))
+            ; Ack all
+            (mapv c/ack! batch)
+            (assoc op :type :ok, :value (mapv c/data batch)))
           (do (Thread/sleep (rand-int 2000))
               (assoc op :type :info, :error :not-subscribed))))))
 
@@ -252,7 +256,102 @@
   writes
   ))
 
-(deftype Checker []
+(defn viz-points
+  "Takes a history and sets of unexpected and lost records. Returns a map of
+  three series of datapoints: :ok, :lost, and :unexpected"
+  [test history lost unexpected]
+  (let [t0 (:time (first history))
+        t1 (:time (peek history))
+        dt (- t1 t0)
+        ; Size of the time windows. This is sort of arbitrary; we're just
+        ; saying the graph is divided into 100 vertical slices.
+        window-count 512
+        window-size (/ dt window-count)
+        ; A vector of windows, where each window is a map of {:ok, :lost, and
+        ; :unexpected}, each of those being a vector of times. We'll derive the
+        ; y coordinates once the windows are built.
+        empty-window {:ok [], :lost [], :unexpected []}
+        empty-windows (vec (repeat window-count empty-window))
+        windows
+        (->> ;(t/take 10)
+             (t/filter (h/has-f? :publish))
+             (t/filter h/invoke?)
+             (t/fold
+               {:identity (constantly empty-windows)
+                :reducer  (fn reducer [windows op]
+                            (let [window (-> (:time op)
+                                             (- t0)
+                                             (/ dt)
+                                             (* window-count)
+                                             Math/floor
+                                             long)
+                                  value (:value op)
+                                  type (cond (lost value)       :lost
+                                             (unexpected value) :unexpected
+                                             true               :ok)]
+                              (update windows window
+                                      update type
+                                      conj (nanos->secs (:time op)))))
+                :combiner (fn combiner [windows1 windows2]
+                            (mapv (fn merge [win1 win2]
+                                    (merge-with into win1 win2))
+                                  windows1
+                                  windows2))})
+             (h/tesser history))
+        ; How many points in the biggest window?
+        max-window-count (->> windows
+                              (map (fn c [window]
+                                     (reduce + (map count (vals window)))))
+                              (reduce max 0))
+        ; How many Hz is the biggest window?
+        max-window-hz (/ max-window-count (nanos->secs window-size))]
+    ; Now we'll unfurl each window into [x y] points, where the y coordinates
+    ; are scaled relative to the window with the most points. This a.) spreads
+    ; out points, and b.) means the y axis of the graph gives a feeling for
+    ; overall throughput over time.
+    (loopr [series empty-window]
+           [window windows]
+           ; With this window, give each point an increasing counter, carrying
+           ; that counter i across all three types.
+           (recur
+             (loopr [i      0
+                     series series]
+                    [[type times] window
+                     t            times]
+                    (let [y (float (* max-window-hz (/ i max-window-count)))]
+                      (recur (inc i)
+                             (update series type conj [t y])))
+                    series)))))
+
+(defn viz!
+  "Writes out a graph for checker results, showing which records were preserved
+  and lost over time."
+  [test history {:keys [subdirectory nemeses]} lost unexpected]
+  (let [nemeses  (or nemeses (:nemeses (:plot test)))
+        _ (prn :nemeses nemeses)
+        datasets (viz-points test history lost unexpected)
+        output   (.getCanonicalPath (store/path! test subdirectory "set.png"))
+        preamble (concat (perf/preamble output)
+                         [[:set :title (str (:name test) " set")]
+                          '[[set ylabel "Throughput (Hz)"]]])
+        series   (for [[type points] datasets]
+                   {:title (name type)
+                    :with 'points
+                    :linetype (perf/type->color
+                                (case type
+                                  :ok :ok
+                                  :unexpected :info
+                                  :lost :fail))
+                    :pointtype 0
+                    :data points})]
+    (-> {:preamble preamble
+         :series series}
+        perf/with-range
+        (perf/with-nemeses history nemeses)
+        perf/plot!
+        (try+ (catch [:type ::no-points] _ :no-points)))))
+
+(defrecord Checker []
   checker/Checker
   (check [this test history opts]
     (let [{:keys [attempts published next-messaged fetched]}
@@ -292,6 +391,8 @@
           ; Recovered records are dequeues where we didn't know if the enqueue
           ; suceeded or not, but an attempt took place.
           recovered  (set/difference ok published)]
+
+      (viz! test history opts lost unexpected)
 
       {:valid?             (and (empty? lost) (empty? unexpected))
        :attempt-count      (count attempts)
