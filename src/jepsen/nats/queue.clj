@@ -70,9 +70,14 @@
   client/Client
   (open! [this test node]
     (let [client (c/open test node)]
-      (assoc this
-             :client       (c/open test node)
-             :subscription (promise))))
+      (try
+        (assoc this
+               :client       (c/open test node)
+               :subscription (promise))
+        (catch java.io.IOException e
+          ; Don't spam connections
+          (Thread/sleep 1000)
+          (throw e)))))
 
   (setup! [this test]
     (c/with-retry
@@ -264,7 +269,7 @@
         t1 (:time (peek history))
         dt (- t1 t0)
         ; Size of the time windows. This is sort of arbitrary; we're just
-        ; saying the graph is divided into 100 vertical slices.
+        ; saying the graph is divided into 512 vertical slices.
         window-count 512
         window-size (/ dt window-count)
         ; A vector of windows, where each window is a map of {:ok, :lost, and
@@ -328,7 +333,6 @@
   and lost over time."
   [test history {:keys [subdirectory nemeses]} lost unexpected]
   (let [nemeses  (or nemeses (:nemeses (:plot test)))
-        _ (prn :nemeses nemeses)
         datasets (viz-points test history lost unexpected)
         output   (.getCanonicalPath (store/path! test subdirectory "set.png"))
         preamble (concat (perf/preamble output)

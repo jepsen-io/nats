@@ -11,6 +11,7 @@
                     [generator :as gen]
                     [net :as net]
                     [util :as util]
+                    [random :as rand]
                     [role :as role]]
             [jepsen.control.util :as cu]
             [jepsen.nemesis [combined :as nc]
@@ -86,11 +87,11 @@
 (defrecord MemberState
   [node-views
    view
-   pending]
+   pending
+   targetable-nodes]
 
   m/State
   (setup! [this test]
-    (info "Setup membership")
     this)
 
   (node-view [this test node]
@@ -99,12 +100,16 @@
           (fn [_ _]
             (try+
               (let [js (db/jetstream)]
-                ; Guessing that these are monotone? We're not doing clock skew
-                ; yet so it's probably fine.
+                ; Guessing that these are monotone? We're not doing
+                ; clock skew yet so it's probably fine.
                 (when (:now (:data js))
                   {:time (:now (:data js))
                    :nodes (nodes js)}))
+              (catch [:type :jepsen.control/nonzero-exit :exit 1] _
+                ; No server available
+                )
               (catch [:type :jepsen.control/nonzero-exit] e
+                (info e "Jetstream threw")
                 nil))))
         first
         val))
@@ -120,20 +125,49 @@
     ; One thing at a time; I'm not at all confident in doing multiple
     ; membership ops concurrently
     (if (seq pending)
-      :pending
-      ; Always leave at least 3 nodes. No idea how to tell what NATS needs as a
-      ; minimum
-      (if (< 3 (count view))
-        ; We can remove a node
-        {:type :info, :f :leave, :value (rand-nth (vec view))}
-        :pending)))
+      ; We can repeat a pending operation; they often get stuck
+      (-> (rand-nth (vec pending))
+          first
+          (select-keys [:type :f :value]))
+      ; Pick something new to do
+      (let [; Leaves are less safe; we only leave one node at a time.
+            pending-leaves  (seq (filter (comp #{:leave} :f first) pending))
+            joinable        (remove view (:nodes test))
+            ; Don't remove all nodes
+            removable       (when (< 1 (count view))
+                              (filter view targetable-nodes))
+            ops
+            (cond-> []
+              ; If we have pending leaves, we can re-issue one of them
+              pending-leaves
+              (conj (-> (rand/nth (vec pending-leaves))
+                        first
+                        (select-keys [:type :f :value])))
+
+              ; If nothing is leaving, and we have a removable node, we can
+              ; remove it.
+              (and (seq removable) (empty? pending-leaves))
+              (conj {:type :info, :f :leave, :value (rand/nth removable)})
+
+              ; If we've got spare nodes, we can join one.
+              (seq joinable)
+              (conj {:type :info, :f :join, :value (rand/nth joinable)}))]
+        (if (seq ops)
+          (rand/nth ops)
+          ; No possible actions right now
+          :pending))))
 
   (invoke! [this test op]
     (case (:f op)
+      :join
+      (let [node (:value op)
+            v (-> (c/on-nodes test [node] db/join!) first val)]
+        (assoc op :value [node v]))
+
       :leave
       (let [leaver (:value op)
             v (c/on-nodes test [leaver] db/wipe!)
-            v (c/on-nodes test [(rand-nth (vec (disj view leaver)))]
+            v (c/on-nodes test [(rand/nth (vec (disj view leaver)))]
                                  (fn [_ _]
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
@@ -144,17 +178,67 @@
     this)
 
   (resolve-op [this test [op op']]
-    (info "Try to resolve" op "(view is" view ")")
+    ;(info "Try to resolve" op "->" (pr-str (:value op')) "(view is" view ")")
     (case (:f op)
+      :join
+      (let [node (:value op)]
+        ; It's joined when it shows up in the view.
+        (if (contains? view node)
+          this
+          nil))
+
       :leave
       (let [node (:value op)]
-        ; Gone from the view?
-        (if (not (contains? view node))
+        (condp re-find (second (:value op'))
+          ; I... *think* this means it'll never happen?
+          #"did not receive a response"
           this
-          nil ; Waiting
-          ))))
+
+          ; Gone from the view?
+          (if (not (contains? view node))
+            this
+            nil ; Waiting
+            )))))
 
   (teardown! [this test]))
+
+(defn membership-package
+  "Constructs a nemesis package for membership changes, given CLI options."
+  [opts]
+  (let [; NATS will collapse almost immediately if we do more than a handful of
+        ; join/leave operations--clusters seem to become totally unrecoverable.
+        ; We pick a minority of nodes to interfere with over the whole life of
+        ; the cluster; hopefully THAT is safe.
+        targetable-nodes
+        (->> (:nodes opts)
+             rand/shuffle
+             (take (util/minority (count (:nodes opts))))
+             vec)
+        ; Or allow everything...
+        targetable-nodes (:nodes opts)
+        pkg
+        (m/package
+          (assoc opts
+                 :membership {:state (map->MemberState
+                                       {:node-views {}
+                                        :view (sorted-set)
+                                        :pending #{}
+                                        :targetable-nodes targetable-nodes})
+                              :log-resolve-op? true
+                              :log-resolve? false
+                              :log-node-views? false
+                              :log-view? true}))]
+    (when pkg
+      ; At the end, rejoin all targetable nodes.
+      (assoc pkg
+             :perf #{{:name "membership"
+                      :start #{:leave}
+                      :stop  #{:join}
+                      :color "#9AE48B"}}
+             :final-generator
+             (mapv (fn [node]
+                     {:type :info, :f :join, :value node})
+                   targetable-nodes)))))
 
 (defn package
   "Takes CLI opts. Constructs a nemesis and generator for the test."
@@ -165,17 +249,7 @@
                ; Standard packages
                (nc/nemesis-packages opts)
                ; Custom packages
-               [(m/package
-                  (assoc opts
-                         :membership {:state (map->MemberState
-                                               {:node-views {}
-                                                :view (sorted-set)
-                                                :pending #{}})
-                                      :log-resolve-op? true
-                                      :log-resolve? true
-                                      :log-node-views? true
-                                      :log-view? true}))
-                ]))
+               [(membership-package opts)]))
         nsp (:stable-period opts)]
     ;(info :packages (map (comp n/fs :nemesis) packages))
     (cond-> (nc/compose-packages packages)

@@ -9,7 +9,7 @@
                                com.fasterxml.jackson.core/jackson-annotations
                                com.fasterxml.jackson.core/jackson-core]]
                  [io.jepsen/antithesis "0.1.0-SNAPSHOT"]
-                 [io.nats/jnats "2.21.1"]
+                 [io.nats/jnats "2.24.0"]
                  ; We're stuck on this version because Antithesis only works
                  ; with Jackson ~2.2.3, and this version of Cheshire is close
                  ; enough to be compatible

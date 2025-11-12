@@ -49,6 +49,7 @@
   (let [opts (.. (Options/builder)
                  (server (str "nats://" node ":" port))
                  (userInfo "jepsen" "jepsenpw")
+                 (ignoreDiscoveredServers) ; Stick to the server we say please
                  (pingInterval (Duration/ofMillis 5000))
                  (connectionTimeout 5000)
                  (socketWriteTimeout 10000)
@@ -56,8 +57,9 @@
                  ; I'm hoping that letting NATS do infinite reconnects will
                  ; save us from the thread leak issue
                  (maxReconnects -1)
+                 (reconnectWait (Duration/ofSeconds 1))
                  (build))
-        conn (Nats/connectReconnectOnConnect opts)]
+        conn (Nats/connect opts)]
     (try
       ;(.connect conn false)
       (Client. conn

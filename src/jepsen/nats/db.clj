@@ -90,7 +90,7 @@
   enabled. But you can't administer anything else using a regular user. So you
   need two admin users? :-/"
   [& args]
-  (apply c/exec :nats :-s c/*host* :--password "jepsenpw" :--timeout 100 args))
+  (apply c/exec :nats :-s c/*host* :--password "jepsenpw" :--timeout "100ms" args))
 
 (defn nats!
   "Runs a NATS CLI command."
@@ -117,6 +117,7 @@
   ; Zero clue how to do this safely. Probably involves parsing a zillion admin
   ; commands.
   (info "Telling" c/*host* "that" node "is gone")
+  (swap! (:living (:db test)) disj node)
   (try (nats*! :--user "jepsen" :stream :cluster :peer-remove :-f
           "jepsen-stream" node)
        (finally
@@ -129,7 +130,13 @@
   (db/kill! (:db test) test node)
   (c/su (c/exec :rm :-rf data-dir)))
 
-(defrecord DB [peer-ids lazyfs]
+(defn join!
+  "Joins the currently-bound node to the cluster."
+  [test node]
+  (swap! (:living (:db test)) conj node)
+  (db/start! (:db test) test node))
+
+(defrecord DB [peer-ids lazyfs living]
   db/DB
   (setup! [this test node]
     (install! test)
@@ -142,8 +149,8 @@
       (c/cd dir (c/exec bin)))
 
     (db/start! this test node)
-    (cu/await-tcp-port client/port)
-    )
+    (cu/await-tcp-port client/port
+                       {:log-interval 10000}))
 
   (teardown! [this test node]
     ; Always tear down, in case we have a previous, crashed state left over
@@ -189,4 +196,5 @@
 (defn db
   "Constructs a new DB for the test, given CLI opts."
   [opts]
-  (map->DB {:lazyfs (lazyfs/db {:dir data-dir})}))
+  (map->DB {:living (atom #{})
+            :lazyfs (lazyfs/db {:dir data-dir})}))

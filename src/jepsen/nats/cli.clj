@@ -131,7 +131,8 @@
               gen
               ; Recover
               (gen/nemesis
-                [(:final-generator nemesis)
+                [(gen/log "Recovering")
+                 (:final-generator nemesis)
                  (gen/log "Beginning final generator")])
               ; Final gen
               (->> (:final-generator workload)
@@ -158,7 +159,9 @@
                         jepsen.nemesis/noop
                         (:nemesis nemesis jepsen.nemesis/noop))
            :plot      {:nemeses (:perf nemesis)}
-           :generator gen})
+           :generator gen
+           :logging {:overrides
+                     {"io.nats.client.impl.ErrorListenerLoggerImpl" "FATAL"}}})
         a/test)))
 
 (defn nats-test-with-antithesis
@@ -184,7 +187,7 @@
     :validate [(partial every? db-node-targets) (cli/one-of db-node-targets)]]
 
    [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
-    :default  60
+    :default  300
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
