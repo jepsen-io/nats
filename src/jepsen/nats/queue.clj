@@ -263,8 +263,8 @@
 
 (defn viz-points
   "Takes a history and sets of unexpected and lost records. Returns a map of
-  three series of datapoints: :ok, :lost, and :unexpected"
-  [test history lost unexpected]
+  four series of datapoints: :ok, :unknown, :lost, and :unexpected"
+  [test history unknown lost unexpected]
   (let [t0 (:time (first history))
         t1 (:time (peek history))
         dt (- t1 t0)
@@ -275,7 +275,7 @@
         ; A vector of windows, where each window is a map of {:ok, :lost, and
         ; :unexpected}, each of those being a vector of times. We'll derive the
         ; y coordinates once the windows are built.
-        empty-window {:ok [], :lost [], :unexpected []}
+        empty-window {:ok [], :unknown [], :lost [], :unexpected []}
         empty-windows (vec (repeat window-count empty-window))
         windows
         (->> ;(t/take 10)
@@ -291,7 +291,8 @@
                                              Math/floor
                                              long)
                                   value (:value op)
-                                  type (cond (lost value)       :lost
+                                  type (cond (unknown value)    :unknown
+                                             (lost value)       :lost
                                              (unexpected value) :unexpected
                                              true               :ok)]
                               (update windows window
@@ -331,9 +332,9 @@
 (defn viz!
   "Writes out a graph for checker results, showing which records were preserved
   and lost over time."
-  [test history {:keys [subdirectory nemeses]} lost unexpected]
+  [test history {:keys [subdirectory nemeses]} unknown lost unexpected]
   (let [nemeses  (or nemeses (:nemeses (:plot test)))
-        datasets (viz-points test history lost unexpected)
+        datasets (viz-points test history unknown lost unexpected)
         output   (.getCanonicalPath (store/path! test subdirectory "set.png"))
         preamble (concat (perf/preamble output)
                          [[:set :title (str (:name test) " set")]
@@ -341,12 +342,15 @@
         series   (for [[type points] datasets]
                    {:title (name type)
                     :with 'points
-                    :linetype (perf/type->color
-                                (case type
-                                  :ok :ok
-                                  :unexpected :info
-                                  :lost :fail))
-                    :pointtype 0
+                    :linetype ['rgb (case type
+                                      :ok         "#81BFFC"
+                                      :unknown    "#FFA400"
+                                      :lost       "#FF1E90"
+                                      :unexpected "#00FFA4")]
+                    ; With few points, use bigger dots
+                    :pointtype (if (< (count points) 16384)
+                                 1
+                                 0)
                     :data points})]
     (-> {:preamble preamble
          :series series}
@@ -394,9 +398,12 @@
 
           ; Recovered records are dequeues where we didn't know if the enqueue
           ; suceeded or not, but an attempt took place.
-          recovered  (set/difference ok published)]
+          recovered  (set/difference ok published)
 
-      (viz! test history opts lost unexpected)
+          ; Unknown records were attempts which were not ok or lost.
+          unknown    (set/difference attempts ok lost)]
+
+      (viz! test history opts unknown lost unexpected)
 
       {:valid?             (and (empty? lost) (empty? unexpected))
        :attempt-count      (count attempts)
