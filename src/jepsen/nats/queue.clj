@@ -109,6 +109,9 @@
         :fetch
         (if-let [sub (sub! this)]
           (let [batch (c/fetch sub)]
+            (when (not (seq batch))
+              ; Empty; let's not spam requests constantly
+              (Thread/sleep 1000))
             ; Ack all
             (mapv c/ack! batch)
             (assoc op :type :ok, :value (mapv c/data batch)))
