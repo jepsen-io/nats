@@ -132,10 +132,11 @@
       ; Pick something new to do
       (let [; Leaves are less safe; we only leave one node at a time.
             pending-leaves  (seq (filter (comp #{:leave} :f first) pending))
-            joinable        (remove view (:nodes test))
-            ; Don't remove all nodes
-            removable       (when (< 1 (count view))
-                              (filter view targetable-nodes))
+            joinable        (seq (remove view (:nodes test)))
+            ; Always leave 3 nodes in the cluster
+            min-node-count  3
+            removable       (seq (when (< min-node-count (count view))
+                                   (filter view targetable-nodes)))
             ops
             (cond-> []
               ; If we have pending leaves, we can re-issue one of them
@@ -146,12 +147,12 @@
 
               ; If nothing is leaving, and we have a removable node, we can
               ; remove it.
-              (and (seq removable) (empty? pending-leaves))
-              (conj {:type :info, :f :leave, :value (rand/nth removable)})
+              (and removable (not pending-leaves))
+              (conj {:type :info, :f :leave, :value (rand/nth (vec removable))})
 
               ; If we've got spare nodes, we can join one.
-              (seq joinable)
-              (conj {:type :info, :f :join, :value (rand/nth joinable)}))]
+              joinable
+              (conj {:type :info, :f :join, :value (rand/nth (vec joinable))}))]
         (if (seq ops)
           (rand/nth ops)
           ; No possible actions right now
