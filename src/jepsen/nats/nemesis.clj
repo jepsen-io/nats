@@ -133,7 +133,10 @@
       (let [; Leaves are less safe; we only leave one node at a time.
             pending-leaves  (seq (filter (comp #{:leave} :f first) pending))
             joinable        (seq (remove view (:nodes test)))
-            ; Always leave 3 nodes in the cluster
+            ; Always leave 3 nodes in the cluster. Ehhhh, this may not work
+            ; well; I think there's a race condition where a node can be parted
+            ; but the cluster view doesn't reflect it, so you race down to 2/5
+            ; nodes.
             min-node-count  3
             removable       (seq (when (< min-node-count (count view))
                                    (filter view targetable-nodes)))
