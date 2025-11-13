@@ -404,8 +404,31 @@
           recovered  (set/difference ok published)
 
           ; Unknown records were attempts which were not ok or lost.
-          unknown    (set/difference attempts ok lost)]
+          unknown    (set/difference attempts ok lost)
 
+          ; What's the highest read counter for each process?
+          highest-reads (loopr [hrs (transient {})]
+                               [pair read]
+                               (recur
+                                 (let [process (pair->process pair)
+                                       counter (pair->counter pair)]
+                                   ; Taking advantage of the fact that "" is
+                                   ; less than any string
+                                   (if (< (get hrs process -1) counter)
+                                     (assoc! hrs process counter)
+                                     hrs)))
+                               (persistent! hrs))
+          _ (prn :highest-reads)
+          _ (pprint highest-reads)
+
+          ; Did we lose anything *below* the highest reads?
+          holes (->> lost
+                     (filter (fn [pair]
+                               (let [highest (get highest-reads
+                                                  (pair->process pair))]
+                                 (or (nil? highest)
+                                     (< (pair->counter pair) highest)))))
+                     set)]
       (viz! test history opts unknown lost unexpected)
 
       {:valid?             (and (empty? lost) (empty? unexpected))
@@ -415,9 +438,11 @@
        :ok-count           (count ok)
        :unexpected-count   (count unexpected)
        :lost-count         (count lost)
+       :hole-count         (count holes)
        :recovered-count    (count recovered)
        :lost               (into (sorted-set) (take 32 lost))
-       :unexpected         (into (sorted-set) (take 32 unexpected))})))
+       :unexpected         (into (sorted-set) (take 32 unexpected))
+       :holes              (into (sorted-set) (take 32 holes))})))
 
 (defn workload
   "Takes CLI options, returns a workload with a client and generator."
