@@ -244,6 +244,86 @@
                      {:type :info, :f :join, :value node})
                    targetable-nodes)))))
 
+;; File corruption
+
+(defn rand-data-file
+  "Picks a random NATS data file on the given node. Takes an optional file
+  extension, e.g. '.db', which causes it to only pick *.db files."
+  [test node ext]
+  ; We're not messing with the sys streams yet
+  (let [dir (str db/data-dir "/jetstream/jepsen/")]
+    (get (c/on-nodes test [node]
+                     (fn [_ _]
+                       (c/su
+                         (->> (cu/ls dir
+                                     {:recursive? true
+                                      :full-path? true
+                                      :types [:file]})
+                              (filter (fn filter-ext [^String path]
+                                        (.endsWith path ext)))
+                              vec
+                              rand/nth))))
+         node)))
+
+(defn corrupt-file-expand-value
+  "Fills in parameters for a file corruption operation."
+  [{:keys [f value] :as op} test ctx]
+  (update op :value
+          (partial map (fn per-corruption [{:keys [node] :as corruption}]
+                         ; Find a relevant file on the node
+                         (let [file (rand-data-file test node ".blk")
+                               corruption (assoc corruption :file file)]
+                           (case f
+                             :bitflip-file-chunks
+                             (assoc corruption
+                                    :probability 1e-6)
+
+                             :snapshot-file-chunks
+                             (assoc corruption :probability 0.5)
+
+                             :restore-file-chunks
+                             (assoc corruption :probability 0.5)
+
+                             corruption))))))
+
+(defn corrupt-file-package
+  "A nemesis package for corrupting data files."
+  [{:keys [faults interval corrupt-file] :as opts}]
+  (let [{:keys []} corrupt-file
+        ; What faults can we perform?
+        faults (set/intersection faults
+                                 #{:bitflip-file-chunks
+                                   :snapshot-file-chunks})
+        needed? (seq faults)
+        ; Generator of core faults, without values
+        gen (gen/mix
+              (mapv {:bitflip-file-chunks
+                     (gen/repeat {:type :info, :f :bitflip-file-chunks})
+
+                     :snapshot-file-chunks
+                     (gen/flip-flop
+                       (gen/repeat {:type :info, :f :snapshot-file-chunks})
+                       (gen/repeat {:type :info, :f :restore-file-chunks}))}
+                    faults))
+        ; Target a minority of nodes
+        gen (nf/nodes-gen (comp util/minority count :nodes) gen)
+        ; Expand values into specific files, probabilities, etc
+        gen (gen/map corrupt-file-expand-value gen)
+        ; And slow down
+        gen (gen/stagger interval gen)]
+    {:nemesis (nf/corrupt-file-nemesis
+                ; 4K chunks by default, I guess?
+                {:chunk-size (* 1024 4)})
+     :generator (when needed? gen)
+     :perf #{{:name "corrupt-file"
+              :fs #{:bitflip-file-chunks
+                    :copy-file-chunks
+                    :snapshot-file-chunks
+                    :restore-file-chunks}
+              :start  #{}
+              :stop   #{}
+              :color  "#D2E9A0"}}}))
+
 (defn package
   "Takes CLI opts. Constructs a nemesis and generator for the test."
   [opts]
@@ -253,7 +333,8 @@
                ; Standard packages
                (nc/nemesis-packages opts)
                ; Custom packages
-               [(membership-package opts)]))
+               [(membership-package opts)
+                (corrupt-file-package opts)]))
         nsp (:stable-period opts)]
     ;(info :packages (map (comp n/fs :nemesis) packages))
     (cond-> (nc/compose-packages packages)

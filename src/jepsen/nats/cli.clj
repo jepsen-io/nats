@@ -35,7 +35,9 @@
     :partition
     :packet
     :clock
-    :membership})
+    :membership
+    :bitflip-file-chunks
+    :snapshot-file-chunks})
 
 (def db-node-targets
   "Different ways we can target single nodes for database faults."
@@ -54,8 +56,13 @@
    [:pause]
    [:packet]
    [:clock]
+   [:bitflip-file-chunks :kill]
+   [:snapshot-file-chunks :kill]
    ; General chaos
-   [:partition :pause :kill :clock :packet :membership]])
+   [:partition :pause :kill :clock :packet :bitflip-file-chunks
+    :snapshot-file-chunks]
+   ; Membership changes are pretty badly broken
+   ])
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults."
