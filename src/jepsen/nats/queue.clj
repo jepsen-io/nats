@@ -12,7 +12,8 @@
                     [store :as store]
                     [util :refer [meh linear-time-nanos
                                   nanos->secs secs->nanos]]]
-            [jepsen.checker [perf :as perf]]
+            [jepsen.checker [perf :as perf]
+                            [plot :as plot]]
             [jepsen.nats [client :as c]]
             [slingshot.slingshot :refer [try+ throw+]]
             [tesser.core :as t]))
@@ -264,104 +265,6 @@
   writes
   ))
 
-(defn viz-points
-  "Takes a history and sets of unexpected and lost records. Returns a map of
-  four series of datapoints: :ok, :unknown, :lost, and :unexpected"
-  [test history unknown lost unexpected]
-  (let [t0 (:time (first history))
-        t1 (:time (peek history))
-        dt (- t1 t0)
-        ; Size of the time windows. This is sort of arbitrary; we're just
-        ; saying the graph is divided into 512 vertical slices.
-        window-count 512
-        window-size (/ dt window-count)
-        ; A vector of windows, where each window is a map of {:ok, :lost, and
-        ; :unexpected}, each of those being a vector of times. We'll derive the
-        ; y coordinates once the windows are built.
-        empty-window {:ok [], :unknown [], :lost [], :unexpected []}
-        empty-windows (vec (repeat window-count empty-window))
-        windows
-        (->> ;(t/take 10)
-             (t/filter (h/has-f? :publish))
-             (t/filter h/invoke?)
-             (t/fold
-               {:identity (constantly empty-windows)
-                :reducer  (fn reducer [windows op]
-                            (let [window (-> (:time op)
-                                             (- t0)
-                                             (/ dt)
-                                             (* window-count)
-                                             Math/floor
-                                             long)
-                                  value (:value op)
-                                  type (cond (unknown value)    :unknown
-                                             (lost value)       :lost
-                                             (unexpected value) :unexpected
-                                             true               :ok)]
-                              (update windows window
-                                      update type
-                                      conj (nanos->secs (:time op)))))
-                :combiner (fn combiner [windows1 windows2]
-                            (mapv (fn merge [win1 win2]
-                                    (merge-with into win1 win2))
-                                  windows1
-                                  windows2))})
-             (h/tesser history))
-        ; How many points in the biggest window?
-        max-window-count (->> windows
-                              (map (fn c [window]
-                                     (reduce + (map count (vals window)))))
-                              (reduce max 0))
-        ; How many Hz is the biggest window?
-        max-window-hz (/ max-window-count (nanos->secs window-size))]
-    ; Now we'll unfurl each window into [x y] points, where the y coordinates
-    ; are scaled relative to the window with the most points. This a.) spreads
-    ; out points, and b.) means the y axis of the graph gives a feeling for
-    ; overall throughput over time.
-    (loopr [series empty-window]
-           [window windows]
-           ; With this window, give each point an increasing counter, carrying
-           ; that counter i across all three types.
-           (recur
-             (loopr [i      0
-                     series series]
-                    [[type times] window
-                     t            times]
-                    (let [y (float (* max-window-hz (/ i max-window-count)))]
-                      (recur (inc i)
-                             (update series type conj [t y])))
-                    series)))))
-
-(defn viz!
-  "Writes out a graph for checker results, showing which records were preserved
-  and lost over time."
-  [test history {:keys [subdirectory nemeses]} unknown lost unexpected]
-  (let [nemeses  (or nemeses (:nemeses (:plot test)))
-        datasets (viz-points test history unknown lost unexpected)
-        output   (.getCanonicalPath (store/path! test subdirectory "set.png"))
-        preamble (concat (perf/preamble output)
-                         [[:set :title (str (:name test) " set")]
-                          '[[set ylabel "Throughput (Hz)"]]])
-        series   (for [[type points] datasets]
-                   {:title (name type)
-                    :with 'points
-                    :linetype ['rgb (case type
-                                      :ok         "#81BFFC"
-                                      :unknown    "#FFA400"
-                                      :lost       "#FF1E90"
-                                      :unexpected "#00FFA4")]
-                    ; With few points, use bigger dots
-                    :pointtype (if (< (count points) 16384)
-                                 1
-                                 0)
-                    :data points})]
-    (-> {:preamble preamble
-         :series series}
-        perf/with-range
-        (perf/with-nemeses history nemeses)
-        perf/plot!
-        (try+ (catch [:type ::no-points] _ :no-points)))))
-
 (defrecord Checker []
   checker/Checker
   (check [this test history opts]
@@ -418,8 +321,6 @@
                                      (assoc! hrs process counter)
                                      hrs)))
                                (persistent! hrs))
-          _ (prn :highest-reads)
-          _ (pprint highest-reads)
 
           ; Did we lose anything *below* the highest reads?
           holes (->> lost
@@ -429,7 +330,25 @@
                                  (or (nil? highest)
                                      (< (pair->counter pair) highest)))))
                      set)]
-      (viz! test history opts unknown lost unexpected)
+      (plot/op-color-plot!
+        test history
+        (assoc opts
+               :filename "set.png"
+               :title    (str (:name test) " set")
+               :groups {:ok         {:color "#81BFFC"}
+                        :hole       {:color "#D41EFF"}
+                        :lost       {:color "#FF1E90"}
+                        :unexpected {:color "#00FFA4"}
+                        :unknown    {:color "#FFA400"}}
+               :group-fn (fn group [op]
+                           (when (identical? :publish (:f op))
+                             (let [v (:value op)]
+                               (cond
+                                 (unexpected v) :unexpected
+                                 (holes v)      :hole
+                                 (lost v)       :lost
+                                 (ok v)         :ok
+                                 true           :unknown))))))
 
       {:valid?             (and (empty? lost) (empty? unexpected))
        :attempt-count      (count attempts)
