@@ -327,8 +327,8 @@
                      (filter (fn [pair]
                                (let [highest (get highest-reads
                                                   (pair->process pair))]
-                                 (or (nil? highest)
-                                     (< (pair->counter pair) highest)))))
+                                 (and highest
+                                      (< (pair->counter pair) highest)))))
                      set)]
       (plot/op-color-plot!
         test history
