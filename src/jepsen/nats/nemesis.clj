@@ -95,24 +95,20 @@
     this)
 
   (node-view [this test node]
-    (-> (c/on-nodes
-          test [node]
-          (fn [_ _]
-            (try+
-              (let [js (db/jetstream)]
-                ; Guessing that these are monotone? We're not doing
-                ; clock skew yet so it's probably fine.
-                (when (:now (:data js))
-                  {:time (:now (:data js))
-                   :nodes (nodes js)}))
-              (catch [:type :jepsen.control/nonzero-exit :exit 1] _
-                ; No server available
-                )
-              (catch [:type :jepsen.control/nonzero-exit] e
-                (info e "Jetstream threw")
-                nil))))
-        first
-        val))
+    (c/on-node test node
+               (try+
+                 (let [js (db/jetstream)]
+                   ; Guessing that these are monotone? We're not doing
+                   ; clock skew yet so it's probably fine.
+                   (when (:now (:data js))
+                     {:time (:now (:data js))
+                      :nodes (nodes js)}))
+                 (catch [:type :jepsen.control/nonzero-exit :exit 1] _
+                   ; No server available
+                   )
+                 (catch [:type :jepsen.control/nonzero-exit] e
+                   (info e "Jetstream threw")
+                   nil))))
 
   (merge-views [this test]
     ; Since we're asking the Raft leader, we'll use the latest by timestamp
@@ -165,18 +161,18 @@
     (case (:f op)
       :join
       (let [node (:value op)
-            v (-> (c/on-nodes test [node] db/join!) first val)]
+            v (c/on-node test node db/join!)]
         (assoc op :value [node v]))
 
       :leave
       (let [leaver (:value op)
-            v (c/on-nodes test [leaver] db/wipe!)
-            v (c/on-nodes test [(rand/nth (vec (disj view leaver)))]
+            v (c/on-node test leaver db/wipe!)
+            v (c/on-node test (rand/nth (vec (disj view leaver)))
                                  (fn [_ _]
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
                                            (:err e)))))]
-               (assoc op :value [(:value op) (val (first v))]))))
+               (assoc op :value [(:value op) v]))))
 
   (resolve [this test]
     this)
@@ -246,45 +242,66 @@
 
 ;; File corruption
 
+(def file-types
+  "A map of file types (e.g. :blk) to regexes that identify them."
+  {:inf  #"\.inf$"
+   :blk  #"\.blk$"
+   :sum  #"\.sum$"
+   :snap #"/snap[^/]*$"
+   :idx  #"\.idx$"})
+
+(def data-dir
+  "Data dir for file corruptions"
+  ; (str db/data-dir "/jetstream/jepsen/")
+  (str db/data-dir "/jetstream")
+  )
+
 (defn rand-data-file
-  "Picks a random NATS data file on the given node. Takes an optional file
-  extension, e.g. '.db', which causes it to only pick *.db files."
-  [test node ext]
+  "Picks a random NATS data file on the given node. Uses `(:corrupt-file-type
+  test)` to pick only some kinds of files."
+  [test node]
   ; We're not messing with the sys streams yet
-  (let [dir (str db/data-dir "/jetstream/jepsen/")]
-    (get (c/on-nodes test [node]
-                     (fn [_ _]
-                       (c/su
-                         (->> (cu/ls dir
-                                     {:recursive? true
-                                      :full-path? true
-                                      :types [:file]})
-                              (filter (fn filter-ext [^String path]
-                                        (.endsWith path ext)))
-                              vec
-                              rand/nth))))
-         node)))
+  (c/on-node test node
+             (c/su
+               (->> (cu/ls data-dir
+                           {:recursive? true
+                            :full-path? true
+                            :types [:file]})
+                    (filter (if-let [t (:corrupt-file-type test)]
+                              (partial re-find (file-types t))
+                              (constantly true)))
+                    vec
+                    rand/nth-empty))))
+
+(defn corrupt-file-expand-corruption
+  "Fills in the parameters for a single file corruption operation's corruption"
+  [test f {:keys [node] :as corruption}]
+  ; Find a relevant file on the node
+  (when-let [file (rand-data-file test node)]
+    (when-let [size (try+ (-> (c/on-node test node
+                                        (c/exec :stat "-c" "%s" file))
+                             parse-long)
+                          (catch [:type :jepsen.control/nonzero-exit] _))]
+      (let [corruption (assoc corruption :file file)]
+        (case f
+          :bitflip-file-chunks
+          (assoc corruption
+                 :probability
+                 ; Roughly two errors per file
+                 (/ 2 8 size))
+
+          :snapshot-file-chunks
+          (assoc corruption :probability 0.5)
+
+          :restore-file-chunks
+          (assoc corruption :probability 0.5)
+
+          corruption)))))
 
 (defn corrupt-file-expand-value
   "Fills in parameters for a file corruption operation."
   [{:keys [f value] :as op} test ctx]
-  (update op :value
-          (partial map (fn per-corruption [{:keys [node] :as corruption}]
-                         ; Find a relevant file on the node
-                         (let [file (rand-data-file test node ".blk")
-                               corruption (assoc corruption :file file)]
-                           (case f
-                             :bitflip-file-chunks
-                             (assoc corruption
-                                    :probability 1e-6)
-
-                             :snapshot-file-chunks
-                             (assoc corruption :probability 0.5)
-
-                             :restore-file-chunks
-                             (assoc corruption :probability 0.5)
-
-                             corruption))))))
+  (update op :value (partial keep (partial corrupt-file-expand-corruption test f))))
 
 (defn corrupt-file-package
   "A nemesis package for corrupting data files."
@@ -307,6 +324,7 @@
                     faults))
         ; Target a minority of nodes
         gen (nf/nodes-gen (comp util/minority count :nodes) gen)
+        ;gen (nf/nodes-gen (constantly 1) gen)
         ; Expand values into specific files, probabilities, etc
         gen (gen/map corrupt-file-expand-value gen)
         ; And slow down

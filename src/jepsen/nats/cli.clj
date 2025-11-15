@@ -93,6 +93,8 @@
          " lazyfs")
        (when-let [s (:sync-interval opts)]
          (str " s=" s))
+       (when-let [cft (:corrupt-file-type opts)]
+         (str " cft=" (name cft)))
        (let [n (:nemesis opts)]
          (when (seq n)
            (str " " (->> n (map name) sort (str/join ",")))))))
@@ -193,6 +195,10 @@
     :parse-fn parse-comma-kws
     :validate [(partial every? db-node-targets) (cli/one-of db-node-targets)]]
 
+   [nil "--corrupt-file-type TYPE" "What kind of files to corrupt. See nemesis/file-types."
+    :parse-fn keyword
+    :validate [nemesis/file-types (cli/one-of nemesis/file-types)]]
+
    [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
     :default  300
     :parse-fn read-string
@@ -275,11 +281,13 @@
     (for [i     (range (:test-count opts))
           l     lazyfs
           n     nemeses
+          ft    (keys nemesis/file-types)
           w     workloads]
       (nats-test (-> opts
-                       (assoc :lazyfs l
-                              :nemesis  n
-                              :workload w))))))
+                       (assoc :lazyfs             l
+                              :nemesis            n
+                              :corrupt-file-type  ft
+                              :workload           w))))))
 
 (defn -main
   "Handles command line arguments. Can either run a test, or a web server for
