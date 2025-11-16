@@ -244,7 +244,8 @@
 
 (def file-types
   "A map of file types (e.g. :blk) to regexes that identify them."
-  {:inf  #"\.inf$"
+  {:db   #"\.db$"
+   :inf  #"\.inf$"
    :blk  #"\.blk$"
    :sum  #"\.sum$"
    :snap #"/snap[^/]*$"
