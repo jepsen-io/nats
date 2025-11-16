@@ -160,8 +160,10 @@
 
   db/LogFiles
   (log-files [this test node]
-    {config-file "nats.conf"
-     log-file    "nats.log"})
+    (c/su
+      {config-file              "nats.conf"
+       log-file                 "nats.log"
+       (cu/tarball! data-dir)   "data.tar.gz"}))
 
   db/Primary
   (primaries [_ test])
