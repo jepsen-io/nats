@@ -95,7 +95,7 @@
     this)
 
   (node-view [this test node]
-    (c/on-node test node
+    (c/with-node test node
                (try+
                  (let [js (db/jetstream)]
                    ; Guessing that these are monotone? We're not doing
@@ -161,13 +161,13 @@
     (case (:f op)
       :join
       (let [node (:value op)
-            v (c/on-node test node db/join!)]
+            v (c/with-node test node db/join!)]
         (assoc op :value [node v]))
 
       :leave
       (let [leaver (:value op)
-            v (c/on-node test leaver db/wipe!)
-            v (c/on-node test (rand/nth (vec (disj view leaver)))
+            v (c/with-node test leaver db/wipe!)
+            v (c/with-node test (rand/nth (vec (disj view leaver)))
                                  (fn [_ _]
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
@@ -262,7 +262,7 @@
   test)` to pick only some kinds of files."
   [test node]
   ; We're not messing with the sys streams yet
-  (c/on-node test node
+  (c/with-node test node
              (c/su
                (->> (cu/ls data-dir
                            {:recursive? true
@@ -279,7 +279,7 @@
   [test f {:keys [node] :as corruption}]
   ; Find a relevant file on the node
   (when-let [file (rand-data-file test node)]
-    (when-let [size (try+ (-> (c/on-node test node
+    (when-let [size (try+ (-> (c/with-node test node
                                         (c/exec :stat "-c" "%s" file))
                              parse-long)
                           (catch [:type :jepsen.control/nonzero-exit] _))]
@@ -297,6 +297,9 @@
           :restore-file-chunks
           (assoc corruption :probability 0.5)
 
+          :truncate-file
+          (assoc corruption :size (- (rand/zipf size)))
+
           corruption)))))
 
 (defn corrupt-file-expand-value
@@ -311,7 +314,8 @@
         ; What faults can we perform?
         faults (set/intersection faults
                                  #{:bitflip-file-chunks
-                                   :snapshot-file-chunks})
+                                   :snapshot-file-chunks
+                                   :truncate-file})
         needed? (seq faults)
         ; Generator of core faults, without values
         gen (gen/mix
@@ -321,7 +325,10 @@
                      :snapshot-file-chunks
                      (gen/flip-flop
                        (gen/repeat {:type :info, :f :snapshot-file-chunks})
-                       (gen/repeat {:type :info, :f :restore-file-chunks}))}
+                       (gen/repeat {:type :info, :f :restore-file-chunks}))
+
+                     :truncate-file
+                     (gen/repeat {:type :info, :f :truncate-file})}
                     faults))
         ; Target a minority of nodes
         gen (nf/nodes-gen (comp util/minority count :nodes) gen)
@@ -338,7 +345,8 @@
               :fs #{:bitflip-file-chunks
                     :copy-file-chunks
                     :snapshot-file-chunks
-                    :restore-file-chunks}
+                    :restore-file-chunks
+                    :truncate-file}
               :start  #{}
               :stop   #{}
               :color  "#D2E9A0"}}}))

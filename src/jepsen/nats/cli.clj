@@ -37,7 +37,8 @@
     :clock
     :membership
     :bitflip-file-chunks
-    :snapshot-file-chunks})
+    :snapshot-file-chunks
+    :truncate-file})
 
 (def db-node-targets
   "Different ways we can target single nodes for database faults."
@@ -56,11 +57,12 @@
    [:pause]
    [:packet]
    [:clock]
-   [:bitflip-file-chunks :kill]
+   [:bitflip-file-chunks  :kill]
    [:snapshot-file-chunks :kill]
+   [:truncate-file        :kill]
    ; General chaos
    [:partition :pause :kill :clock :packet :bitflip-file-chunks
-    :snapshot-file-chunks]
+    :snapshot-file-chunks :truncate-file-chunks]
    ; Membership changes are pretty badly broken
    ])
 
