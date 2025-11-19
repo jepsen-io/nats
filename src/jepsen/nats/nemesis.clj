@@ -351,6 +351,60 @@
               :stop   #{}
               :color  "#D2E9A0"}}}))
 
+(defn part-kill-package
+  "A package which simulates a single-node power failure combined with a
+  network partition. This is designed to illustrate how even a single node
+  crash, in a network where messages are delayed, can cause data loss with
+  NATS' default settings."
+  [{:keys [faults interval] :as opts}]
+  {:generator
+   (when (:part-kill faults)
+     (fn gen [test ctx]
+       (let [nodes    (into (sorted-set) (:nodes test))
+             n        (count nodes)
+             minority (util/minority n)
+             ; The node that will crash and lose acked writes
+             crasher  (nth (seq nodes) minority)
+             ; Nodes which are partitioned away during the crash
+             part1    (into (sorted-set) (take minority nodes))
+             ; The ones which weren't partitioned away, and didn't crash
+             part2    (-> nodes
+                          (set/difference part1)
+                          (disj crasher))]
+         [; Partition away part1, so they don't receive writes
+          {:type  :info,
+           :f     :start-partition,
+           :value (n/complete-grudge [part1 (set/difference nodes part1)])}
+          ; Pause part1, so they don't get writes
+          ; {:type :info, :f :pause, :value part1}
+          ; Let some writes build up
+          (gen/sleep 30)
+          ; Kill the crasher
+          {:type  :info
+           :f     :kill
+           :value [crasher]}
+          ; Heal the network
+          {:type  :info, :f :pause, :value :all}
+          {:type  :info, :f :stop-partition}
+          ; And now establish a new majority including the crasher
+          {:type  :info
+           :f     :start-partition
+           :value (n/complete-grudge [part2 (set/difference nodes part2)])}
+          {:type :info, :f :resume, :value :all}
+          ; And restart the crashed node
+          {:type  :info
+           :f     :start
+           :value [crasher]}
+          ; And let that run for a bit, so the cluster can come up with the
+          ; nodes missing data
+          (gen/sleep 300)
+          ; Then resolve the partition, and let the whole cluster run
+          {:type :info, :f :stop-partition}
+          (gen/sleep interval)])))
+   :final-generator [{:type :info, :f :stop-partition}
+                     {:type :info, :f :resume, :value :all}
+                     {:type :info, :f :start, :value :all}]})
+
 (defn package
   "Takes CLI opts. Constructs a nemesis and generator for the test."
   [opts]
@@ -361,6 +415,7 @@
                (nc/nemesis-packages opts)
                ; Custom packages
                [(membership-package opts)
+                (part-kill-package opts)
                 (corrupt-file-package opts)]))
         nsp (:stable-period opts)]
     ;(info :packages (map (comp n/fs :nemesis) packages))

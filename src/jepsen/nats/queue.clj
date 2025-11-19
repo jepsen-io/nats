@@ -265,10 +265,97 @@
   writes
   ))
 
+(defn lost-breakout
+  "Takes a set of lost values, and a set of read ones. Partitions lost values
+  into three sets, based on the order in which the process wrote them. For each
+  writing process, these sets are:
+
+    :lost-prefix    All lost values before the first ok read
+    :lost-middle    Those after the first ok read and before the last ok read
+    :lost-postfix   Those after the last ok read (or all values, if
+                    nothing read)
+
+  Lost-prefix hints that NATS 'started over', throwing away everything before
+  some time. Lost-postfix might (might!) be a consequence of a slow reader.
+  Lost-middle is especially bad: we read things before and after that value, so
+  we *definitely* should have read the value in the middle, per NATS'
+  Serializability claims."
+  [lost read]
+  ; First, we need to find the high and low watermarks for each writer process
+  (loopr [; Maps of process->counter
+          first-reads (transient {})
+          last-reads  (transient {})]
+         [pair read]
+         (let [process (pair->process pair)
+               counter (pair->counter pair)]
+           (recur
+             (if (< counter (first-reads process Long/MAX_VALUE))
+               (assoc! first-reads process counter)
+               first-reads)
+             (if (< (last-reads process Long/MIN_VALUE) counter)
+               (assoc! last-reads process counter)
+               last-reads)))
+         ; Partition
+         (loopr [prefix  (transient #{})
+                 middle  (transient #{})
+                 postfix (transient #{})]
+                [pair lost]
+                (let [process (pair->process pair)
+                      counter (pair->counter pair)]
+                  (cond
+                    ; Before first read
+                    (< counter (first-reads process Long/MIN_VALUE))
+                    (recur (conj! prefix pair) middle postfix)
+
+                    ; Before last read
+                    (< counter (last-reads process Long/MIN_VALUE))
+                    (recur prefix (conj! middle pair) postfix)
+
+                    ; After last read
+                    true
+                    (recur prefix middle (conj! postfix pair))))
+                {:lost        lost
+                 :lost-prefix (persistent! prefix)
+                 :lost-middle (persistent! middle)
+                 :lost-postfix (persistent! postfix)})))
+
+(defn lost-plot!
+  "Renders an op color plot to show values which were lost during a test.
+  Returns a Jepsen history task. Takes read, lost-prefix, lost-middle, and
+  lost-postfix sets, in addition to the usual options for op-color-plot!."
+  [test history {:keys [read lost-prefix lost-middle lost-postfix] :as opts}]
+  (assert (set? read))
+  (assert (set? lost-prefix))
+  (assert (set? lost-middle))
+  (assert (set? lost-postfix))
+  (h/task history op-color-plot []
+          (plot/op-color-plot!
+            test history
+            (assoc opts
+                   :groups {:ok           {:color "#81BFFC"}
+                            :lost-prefix  {:color "#8C0348"}
+                            :lost-middle  {:color "#FF1E90"}
+                            :lost-postfix {:color "#FF74BA"}
+                            :unknown      {:color "#FFA400"}}
+                   :group-fn (fn group [op]
+                               (when (identical? :publish (:f op))
+                                 (let [v (:value op)]
+                                   (cond
+                                     (read v)         :ok
+                                     (lost-prefix v)  :lost-prefix
+                                     (lost-middle v)  :lost-middle
+                                     (lost-postfix v) :lost-postfix
+                                     true             :unknown))))))))
+
 (defrecord Checker []
   checker/Checker
   (check [this test history opts]
-    (let [{:keys [attempts published next-messaged fetched]}
+    (let [nodes    (:nodes test)
+          n        (count nodes)
+          op->node (fn op->node [op]
+                     (nth nodes (mod (:process op) n)))
+          {:keys [attempts published next-messaged fetched
+                  fetched-by-node]}
           (->> (t/fuse
                  {:attempts (->> (t/filter (h/has-f? :publish))
                                  (t/filter h/invoke?)
@@ -284,8 +371,21 @@
                   :fetched (->> (t/filter (h/has-f? :fetch))
                                 (t/filter h/ok?)
                                 (t/mapcat :value)
-                                (t/set))})
-               (h/tesser history))
+                                (t/set))
+                  ; Note: for now I'm *just* doing the per-node divergence
+                  ; checks based on fetch, not next-message. This is because
+                  ; I'm specifically worried about the final reads diverging.
+                  ; Later it might be good to break this out in more detail.
+                  :fetched-by-node (->> (t/filter h/ok?)
+                                        (t/filter (h/has-f? :fetch))
+                                        (t/group-by op->node)
+                                        (t/mapcat :value)
+                                        (t/set))})
+                  (h/tesser history))
+          ; Complete fetched-by-node if any nodes were missing
+          fetched-by-node (->> fetched-by-node
+                               (merge (zipmap (:nodes test) (repeat #{})))
+                               (into (sorted-map)))
 
           ; Everything we read via either next-message or fetch
           read       (set/union next-messaged fetched)
@@ -298,70 +398,75 @@
           ; queue emitting records from nowhere!
           unexpected (set/difference read attempts)
 
-          ; Lost records are ones which we definitely enqueued but never
-          ; came out.
-          lost       (set/difference published read)
-
           ; Recovered records are dequeues where we didn't know if the enqueue
           ; suceeded or not, but an attempt took place.
           recovered  (set/difference ok published)
 
+          ; Lost records are ones which we definitely enqueued but never
+          ; came out anywhere.
+          lost       (set/difference published read)
+
           ; Unknown records were attempts which were not ok or lost.
           unknown    (set/difference attempts ok lost)
 
-          ; What's the highest read counter for each process?
-          highest-reads (loopr [hrs (transient {})]
-                               [pair read]
-                               (recur
-                                 (let [process (pair->process pair)
-                                       counter (pair->counter pair)]
-                                   ; Taking advantage of the fact that "" is
-                                   ; less than any string
-                                   (if (< (get hrs process -1) counter)
-                                     (assoc! hrs process counter)
-                                     hrs)))
-                               (persistent! hrs))
+          ; Which we break out into three types
+          lost       (lost-breakout lost read)
 
-          ; Did we lose anything *below* the highest reads?
-          holes (->> lost
-                     (filter (fn [pair]
-                               (let [highest (get highest-reads
-                                                  (pair->process pair))]
-                                 (and highest
-                                      (< (pair->counter pair) highest)))))
-                     set)]
-      (plot/op-color-plot!
-        test history
-        (assoc opts
-               :filename "set.png"
-               :title    (str (:name test) " set")
-               :groups {:ok         {:color "#81BFFC"}
-                        :hole       {:color "#D41EFF"}
-                        :lost       {:color "#FF1E90"}
-                        :unexpected {:color "#00FFA4"}
-                        :unknown    {:color "#FFA400"}}
-               :group-fn (fn group [op]
-                           (when (identical? :publish (:f op))
-                             (let [v (:value op)]
-                               (cond
-                                 (unexpected v) :unexpected
-                                 (holes v)      :hole
-                                 (lost v)       :lost
-                                 (ok v)         :ok
-                                 true           :unknown))))))
+          ; We can also lose a record on just one node.
+          lost-on-node (update-vals fetched-by-node
+                                    (partial set/difference read))
+          ; Which, again, we break out
+          lost-on-node (into (sorted-map)
+                             (map (fn [[node lost]]
+                                    [node
+                                     (lost-breakout lost
+                                                    (fetched-by-node node))])
+                                  lost-on-node))
 
-      {:valid?             (and (empty? lost) (empty? unexpected))
+          ; Render plots
+          plot (lost-plot! test history
+                           (merge opts
+                                  lost
+                                  {:title    (str (:name test) " lost")
+                                   :filename "lost.png"
+                                   :read      read}))
+          node-plots
+          (mapv (fn [node]
+                  (lost-plot! test history
+                              (merge opts
+                                     (lost-on-node node)
+                                     {:title (str (:name test) " lost " node)
+                                      :filename (str "lost " node ".png")
+                                      :read (fetched-by-node node)})))
+                (keys lost-on-node))
+
+          ; Summarize a lost map
+          short-lost (fn [lost]
+                       (reduce (fn [m k]
+                                 (assoc m k (into (sorted-set)
+                                                  (take 32 (lost k)))
+
+                                        (keyword (str (name k) "-count"))
+                                        (count (lost k))))
+                               (sorted-map)
+                               (keys lost)))]
+      ; Wait for plots
+      @plot
+      (mapv deref node-plots)
+
+      {:valid?             (and (empty? (:lost lost))
+                                (empty? unexpected)
+                                (every? empty? (map :lost (vals lost-on-node))))
        :attempt-count      (count attempts)
        :acknowledged-count (count published)
        :read-count         (count read)
        :ok-count           (count ok)
        :unexpected-count   (count unexpected)
        :lost-count         (count lost)
-       :hole-count         (count holes)
        :recovered-count    (count recovered)
-       :lost               (into (sorted-set) (take 32 lost))
-       :unexpected         (into (sorted-set) (take 32 unexpected))
-       :holes              (into (sorted-set) (take 32 holes))})))
+       :lost               (short-lost lost)
+       :lost-on-node       (update-vals lost-on-node short-lost)
+       :unexpected         (into (sorted-set) (take 32 unexpected))})))
 
 (defn workload
   "Takes CLI options, returns a workload with a client and generator."

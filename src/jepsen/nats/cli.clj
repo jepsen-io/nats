@@ -33,6 +33,7 @@
   #{:kill
     :pause
     :partition
+    :part-kill
     :packet
     :clock
     :membership
@@ -57,6 +58,7 @@
    [:pause]
    [:packet]
    [:clock]
+   [:part-kill]
    [:bitflip-file-chunks  :kill]
    [:snapshot-file-chunks :kill]
    [:truncate-file        :kill]
@@ -263,7 +265,7 @@
     :validate [pos? "Must be positive."]]
 
    ["-v" "--version VERSION" "What version should we test?"
-    :default "2.10.20"]
+    :default "2.12.1"]
 
    ["-w" "--workload NAME" "What workload should we run?"
     :default  :queue
