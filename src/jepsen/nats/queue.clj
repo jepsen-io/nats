@@ -414,7 +414,7 @@
 
           ; We can also lose a record on just one node.
           lost-on-node (update-vals fetched-by-node
-                                    (partial set/difference read))
+                                    (partial set/difference published))
           ; Which, again, we break out
           lost-on-node (into (sorted-map)
                              (map (fn [[node lost]]
@@ -462,7 +462,6 @@
        :read-count         (count read)
        :ok-count           (count ok)
        :unexpected-count   (count unexpected)
-       :lost-count         (count lost)
        :recovered-count    (count recovered)
        :lost               (short-lost lost)
        :lost-on-node       (update-vals lost-on-node short-lost)

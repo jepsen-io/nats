@@ -34,6 +34,7 @@
     :pause
     :partition
     :part-kill
+    :pause-kill
     :packet
     :clock
     :membership
@@ -59,6 +60,7 @@
    [:packet]
    [:clock]
    [:part-kill]
+   [:pause-kill]
    [:bitflip-file-chunks  :kill]
    [:snapshot-file-chunks :kill]
    [:truncate-file        :kill]
