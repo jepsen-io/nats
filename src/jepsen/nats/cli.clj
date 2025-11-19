@@ -279,11 +279,15 @@
         lazyfs    (let [l (:lazyfs opts)]
                     (if (nil? l)
                       [false true]
-                      [l]))]
+                      [l]))
+        cfts        (let [cft (:corrupt-file-type opts)]
+                      (if (nil? cft)
+                        (keys nemesis/file-types)
+                        [cft]))]
     (for [i     (range (:test-count opts))
           l     lazyfs
           n     nemeses
-          ft    (keys nemesis/file-types)
+          ft    cfts
           w     workloads]
       (nats-test (-> opts
                        (assoc :lazyfs             l
