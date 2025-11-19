@@ -11,7 +11,7 @@
 # Now our actual config image
 FROM scratch
 
-COPY --from=build-source /corrupt-file /bin/corrupt-file
+#COPY --from=build-source /corrupt-file /bin/corrupt-file
 COPY docker-compose.yaml /docker-compose.yaml
 
 WORKDIR /
