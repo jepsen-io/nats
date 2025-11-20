@@ -139,7 +139,8 @@
                        (:generator nemesis))))
         ; Limit
         gen (if (a/antithesis?)
-              (a/early-termination-generator {:interval 100} gen)
+              (a/early-termination-generator
+                {:interval (:antithesis-interval opts)} gen)
               (gen/time-limit (:time-limit opts) gen))
         ; And afterwards, recover and final gen
         gen (gen/phases
@@ -191,6 +192,11 @@
 (def cli-opts
   "Command-line option specification"
   [[nil "--antithesis" "Forces Antithesis mode. Useful for debugging in local docker."]
+
+   [nil "--antithesis-interval OP-COUNT" "Antithesis can terminate the test after each block of this many operations."
+    :default 100
+    :parse-fn parse-long
+    :validate [pos? "Must be positive"]]
 
    [nil "--concurrency NUMBER" "How many workers should we run? Must be an integer, optionally followed by n (e.g. 3n) to multiply by the number of nodes."
     :default  "3n"
