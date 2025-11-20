@@ -148,12 +148,9 @@
   [test node]
   ; Zero clue how to do this safely. Probably involves parsing a zillion admin
   ; commands.
-  (info "Telling" c/*host* "that" node "is gone")
+  (info "Telling" c/*host* "that" (node->name test node) "is gone")
   (swap! (:living (:db test)) disj node)
-  (try (nats*! :--user "jepsen" :stream :cluster :peer-remove :-f
-          "jepsen-stream" node)
-       (finally
-         (nats! :server :raft :peer-remove :-f :-j node)))
+  (nats! :server :raft :peer-remove :-f :-j (node->name test node))
   :removed)
 
 (defn wipe!
