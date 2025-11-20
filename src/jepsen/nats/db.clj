@@ -141,7 +141,7 @@
   (-> (nats! :server :request :jetstream-health)
       (str/split #"\n")
       (->> (mapv (fn [line]
-                   (:server (json/parse-string line true)))))))
+                   (json/parse-string line true))))))
 
 (defn leave!
   "Tells NATS that the given node is gone."
@@ -171,7 +171,14 @@
   "Joins the currently-bound node to the cluster."
   [test node]
   (swap! (:living (:db test)) conj node)
-  (db/start! (:db test) test node))
+  (db/start! (:db test) test node)
+  (c/with-node test node
+               (try+
+                 (let [js (jetstream-health)
+                       entry (some #(when (= (node->name test node) (get-in % [:server :name])) %) js)]
+                      (when entry
+                            (info "Health of" (node->name test node) "is:" (get-in entry [:data :status]))
+                            (= 200 (get-in entry [:data :status_code])))))))
 
 (defrecord DB [peer-ids lazyfs living]
   db/DB
