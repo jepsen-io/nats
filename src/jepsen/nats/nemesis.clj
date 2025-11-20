@@ -173,6 +173,7 @@
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
                                            (:err e))))]
+               (c/with-node test leaver (db/reconfigure! test leaver))
                (assoc op :value [(:value op) v]))))
 
   (resolve [this test]
