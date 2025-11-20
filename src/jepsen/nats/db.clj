@@ -141,37 +141,44 @@
   (-> (nats! :server :request :jetstream-health)
       (str/split #"\n")
       (->> (mapv (fn [line]
-                   (:server (json/parse-string line true)))))))
+                   (json/parse-string line true))))))
 
 (defn leave!
   "Tells NATS that the given node is gone."
   [test node]
   ; Zero clue how to do this safely. Probably involves parsing a zillion admin
   ; commands.
-  (info "Telling" c/*host* "that" node "is gone")
+  (info "Telling" c/*host* "that" (node->name test node) "is gone")
   (swap! (:living (:db test)) disj node)
-  (try (nats*! :--user "jepsen" :stream :cluster :peer-remove :-f
-          "jepsen-stream" node)
-       (finally
-         (nats! :server :raft :peer-remove :-f :-j node)))
+  (nats! :server :raft :peer-remove :-f :-j (node->name test node))
   :removed)
 
 (defn wipe!
-  "Kills and wipes data on a node. Bumps the node name and rewrites the config
-  file."
+  "Kills and wipes data on a node."
   [test node]
   (db/kill! (:db test) test node)
   (c/su (c/exec :rm :-rf data-dir))
-  (bump-node-name! test node)
-  (c/with-node test node
-    (configure! test node))
   :wiped)
+
+(defn reconfigure!
+      "Reconfigures the node after peer-removal. Bumps the node name and rewrites the config file."
+      [test node]
+      (bump-node-name! test node)
+      (c/with-node test node
+                   (configure! test node)))
 
 (defn join!
   "Joins the currently-bound node to the cluster."
   [test node]
   (swap! (:living (:db test)) conj node)
-  (db/start! (:db test) test node))
+  (db/start! (:db test) test node)
+  (c/with-node test node
+               (try+
+                 (let [js (jetstream-health)
+                       entry (some #(when (= (node->name test node) (get-in % [:server :name])) %) js)]
+                      (when entry
+                            (info "Health of" (node->name test node) "is:" (get-in entry [:data :status]))
+                            (= 200 (get-in entry [:data :status_code])))))))
 
 (defrecord DB [peer-ids lazyfs living]
   db/DB
