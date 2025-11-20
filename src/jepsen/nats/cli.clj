@@ -2,6 +2,7 @@
   "Command-line entry point for NATS tests"
   (:gen-class)
   (:require [clojure [pprint :refer [pprint]]
+                     [set :as set]
                      [string :as str]]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [antithesis :as a]
@@ -39,6 +40,12 @@
     :clock
     :membership
     :bitflip-file-chunks
+    :snapshot-file-chunks
+    :truncate-file})
+
+(def file-corruption-nemeses
+  "Which nemeses corrupt files?"
+  #{:bitflip-file-chunks
     :snapshot-file-chunks
     :truncate-file})
 
@@ -298,7 +305,9 @@
     (for [i     (range (:test-count opts))
           l     lazyfs
           n     nemeses
-          ft    cfts
+          ft    (if (seq (set/intersection file-corruption-nemeses (set n)))
+                  cfts
+                  [nil])
           w     workloads]
       (nats-test (-> opts
                        (assoc :lazyfs             l
