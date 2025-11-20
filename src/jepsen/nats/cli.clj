@@ -163,6 +163,7 @@
           {:name     (test-name opts)
            :os       os
            :db       db
+           :node-names (atom (db/init-node-names (:nodes opts)))
            :checker  (checker/compose
                        {:perf       (checker/perf)
                         :clock      (checker/clock-plot)

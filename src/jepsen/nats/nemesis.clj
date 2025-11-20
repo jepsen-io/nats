@@ -66,23 +66,25 @@
 (defn nodes
   "Figuring out what nodes are in the cluster is... complicated."
   [js]
-  (into (sorted-set)
-        ; Nodes in the meta cluster
-        (concat (let [mc (-> js :data :meta_cluster)]
-                  (->> (map :name (:replicas mc))
-                       (cons (:leader mc))))
-                ; Nodes in each stream
-                (loopr [nodes (sorted-set)]
-                       [ad      (-> js :data :account_details)
-                        sd      (:stream_detail ad)
-                        replica (-> sd :cluster :replicas)]
-                       (do ;(info :sd (with-out-str (pprint sd)))
-                           (recur
-                             (-> nodes
-                                 ; Ugh, they put leaders in a
-                                 ; whole diff structure
-                                 (conj (:leader (:cluster sd)))
-                                 (conj (:name replica)))))))))
+  (->> ; Nodes in the meta cluster
+       (concat (let [mc (-> js :data :meta_cluster)]
+                 (->> (map :name (:replicas mc))
+                      (cons (:leader mc))))
+               ; Nodes in each stream
+               (loopr [nodes (sorted-set)]
+                      [ad      (-> js :data :account_details)
+                       sd      (:stream_detail ad)
+                       replica (-> sd :cluster :replicas)]
+                      (do ;(info :sd (with-out-str (pprint sd)))
+                          (recur
+                            (-> nodes
+                                ; Ugh, they put leaders in a
+                                ; whole diff structure
+                                (conj (:leader (:cluster sd)))
+                                (conj (:name replica)))))))
+       (remove nil?) ; sigh, so many shapes for this data
+       (map db/name->node)
+       (into (sorted-set))))
 
 (defrecord MemberState
   [node-views
@@ -161,17 +163,16 @@
     (case (:f op)
       :join
       (let [node (:value op)
-            v (c/with-node test node db/join!)]
+            v (c/with-node test node (db/join! test node))]
         (assoc op :value [node v]))
 
       :leave
       (let [leaver (:value op)
-            v (c/with-node test leaver db/wipe!)
+            v (c/with-node test leaver (db/wipe! test leaver))
             v (c/with-node test (rand/nth (vec (disj view leaver)))
-                                 (fn [_ _]
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
-                                           (:err e)))))]
+                                           (:err e))))]
                (assoc op :value [(:value op) v]))))
 
   (resolve [this test]

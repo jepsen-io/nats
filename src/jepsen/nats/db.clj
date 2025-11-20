@@ -72,12 +72,44 @@
               (str "nats://" node ":6222")))
        (str/join "\n    ")))
 
+(defn init-node-names
+  "A map of nodes to their initial names."
+  [nodes]
+  (->> nodes
+       (map (fn [node] [node (str node "-0")]))
+       (into {})))
+
+(defn node->name
+  "NATS requires that we assign a unique node name to each node when we wipe
+  it. We store this mapping in a test atom :node-names."
+  [test node]
+  (get @(:node-names test) node))
+
+(defn name->node
+  "Looks up a node from a name. Node names are always of the form `n1-4`, so we
+  simply strip off the -4."
+  [name]
+  (second (re-find #"^(.+)-\d+$" name)))
+
+(defn bump-node-name!
+  "Increments the node name for the given node, mutating the test's node-names
+  map."
+  [test node]
+  (let [r (swap! (:node-names test)
+                 (fn bump [node-names]
+                   (let [counter (->> (node-names node)
+                                      (re-find #"-(\d+)$")
+                                      second
+                                      parse-long)]
+                     (assoc node-names node (str node "-" (inc counter))))))]
+    (info "Node" node "now has name" (r node))))
+
 (defn configure!
   "Writes out the config file for a node."
   [test node]
   (-> (io/resource "nats.conf")
       slurp
-      (str/replace #"%NAME" node)
+      (str/replace #"%NAME" (node->name test node))
       (str/replace #"%ROUTES" (routes test node))
       (str/replace #"%SYNC_INTERVAL" (if-let [s (:sync-interval test)]
                                        (str "sync_interval: " s)
@@ -125,10 +157,15 @@
   :removed)
 
 (defn wipe!
-  "Kills and wipes data on a node."
+  "Kills and wipes data on a node. Bumps the node name and rewrites the config
+  file."
   [test node]
   (db/kill! (:db test) test node)
-  (c/su (c/exec :rm :-rf data-dir)))
+  (c/su (c/exec :rm :-rf data-dir))
+  (bump-node-name! test node)
+  (c/with-node test node
+    (configure! test node))
+  :wiped)
 
 (defn join!
   "Joins the currently-bound node to the cluster."
