@@ -154,15 +154,18 @@
   :removed)
 
 (defn wipe!
-  "Kills and wipes data on a node. Bumps the node name and rewrites the config
-  file."
+  "Kills and wipes data on a node."
   [test node]
   (db/kill! (:db test) test node)
   (c/su (c/exec :rm :-rf data-dir))
-  (bump-node-name! test node)
-  (c/with-node test node
-    (configure! test node))
   :wiped)
+
+(defn reconfigure!
+      "Reconfigures the node after peer-removal. Bumps the node name and rewrites the config file."
+      [test node]
+      (bump-node-name! test node)
+      (c/with-node test node
+                   (configure! test node)))
 
 (defn join!
   "Joins the currently-bound node to the cluster."
