@@ -190,7 +190,12 @@
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
                                            (:err e))))]
-               (c/with-node test leaver (db/reconfigure! test leaver))
+               ; Only reconfigure the node if the peer-remove didn't error.
+               ; There's an issue though where the peer-remove command succeeds because the meta leader immediately
+               ; responds success before it gets quorum on the peer-remove. This could lead us to think the peer-remove
+               ; was successful, but it actually didn't end up being honored.
+               (when-not (and (string? v) (.contains v "nats: error"))
+                 (c/with-node test leaver (db/reconfigure! test leaver)))
                (assoc op :value [(:value op) v]))))
 
   (resolve [this test]
