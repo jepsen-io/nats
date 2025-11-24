@@ -150,6 +150,9 @@
   ; commands.
   (info "Telling" c/*host* "that" (node->name test node) "is gone")
   (swap! (:living (:db test)) disj node)
+  ; There's an issue where the peer-remove command succeeds because the meta leader immediately
+  ; responds success before it gets quorum on the peer-remove. This could lead us to think the
+  ; peer-remove was successful, but it actually didn't end up being honored.
   (nats! :server :raft :peer-remove :-f :-j (node->name test node))
   :removed)
 
@@ -160,16 +163,14 @@
   (c/su (c/exec :rm :-rf data-dir))
   :wiped)
 
-(defn reconfigure!
-      "Reconfigures the node after peer-removal. Bumps the node name and rewrites the config file."
-      [test node]
-      (bump-node-name! test node)
-      (c/with-node test node
-                   (configure! test node)))
-
 (defn join!
   "Joins the currently-bound node to the cluster."
   [test node]
+  ; Reconfigure the node upon joining. If this node existed prior under a different name
+  ; we might or might not have peer-removed it.
+  (bump-node-name! test node)
+  (c/with-node test node
+               (configure! test node))
   (swap! (:living (:db test)) conj node)
   (db/start! (:db test) test node))
 
