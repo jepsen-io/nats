@@ -213,7 +213,7 @@
 
       :leave
       (let [node (:value op)]
-        (condp re-find (second (:value op'))
+        (condp re-find (str (second (:value op')))
           ; I... *think* this means it'll never happen?
           #"did not receive a response"
           this
