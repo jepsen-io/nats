@@ -13,6 +13,7 @@
                     [util :as util]
                     [random :as rand]
                     [role :as role]]
+            [clojure.set :as set]
             [jepsen.control.util :as cu]
             [jepsen.nemesis [combined :as nc]
                             [membership :as m]
@@ -99,13 +100,29 @@
   (node-view [this test node]
     (c/with-node test node
                (try+
-                 (let [js (db/jetstream)]
+                 (let [js (db/jetstream)
+                       health (db/jetstream-health)]
                    ; Guessing that these are monotone? We're not doing
                    ; clock skew yet so it's probably fine.
-                   (when (:now (:data js))
-                     {:time (:now (:data js))
-                      :nodes (nodes js)}))
-                 (catch [:type :jepsen.control/nonzero-exit :exit 1] _
+                   (let [result (if (:now (:data js))
+                                  {:time  (:now (:data js))
+                                   :nodes (nodes js)}
+                                  ; We might not be able to get a new view. This could then result in an old view
+                                  ; being used to leave more nodes than would be safe. Add an empty state such that
+                                  ; we stall and make no further changes until we can observe more.
+                                  {:time  (.format (java.time.format.DateTimeFormatter/ISO_INSTANT) (java.time.Instant/now))
+                                   :nodes #{}})
+                         healthy-nodes (->> health
+                                            (filter #(= 200 (get-in % [:data :status_code])))
+                                            (map #(-> % :server :name))
+                                            (map db/name->node)
+                                            (into #{}))]
+                     ; Return the intersection of the nodes that are in the peer set, with healthy nodes.
+                     ; This gives a view of servers that are not solely in the peer set (which would be almost
+                     ; immediately after starting up a new empty node). But we also wait for the server to report
+                     ; healthy and caught up with all data.
+                     (assoc result :nodes (set/intersection (:nodes result) healthy-nodes))))
+                   (catch [:type :jepsen.control/nonzero-exit :exit 1] _
                    ; No server available
                    )
                  (catch [:type :jepsen.control/nonzero-exit] e
@@ -173,7 +190,6 @@
                                    (try+ (db/leave! test leaver)
                                          (catch [:type :jepsen.control/nonzero-exit] e
                                            (:err e))))]
-               (c/with-node test leaver (db/reconfigure! test leaver))
                (assoc op :value [(:value op) v]))))
 
   (resolve [this test]
@@ -191,7 +207,7 @@
 
       :leave
       (let [node (:value op)]
-        (condp re-find (second (:value op'))
+        (condp re-find (str (second (:value op')))
           ; I... *think* this means it'll never happen?
           #"did not receive a response"
           this
