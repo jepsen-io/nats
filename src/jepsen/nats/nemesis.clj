@@ -1,5 +1,5 @@
 (ns jepsen.nats.nemesis
-  "Fault injection"
+  "Fault injection."
   (:require [clojure [pprint :refer [pprint]]
                      [set :as set]]
             [clojure.java.io :as io]
@@ -87,6 +87,10 @@
        (map db/name->node)
        (into (sorted-set))))
 
+; This is still a WIP. In particular, I think the state machine needs to
+; decouple adding a node from performing a health check to validate that it's
+; returned. This was an undocumented but apparently critical part of the
+; membership change process.
 (defrecord MemberState
   [node-views
    view
