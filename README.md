@@ -1,14 +1,24 @@
 # jepsen.nats
 
-A Clojure library designed to ... well, that part is up to you.
+Jepsen tests for the NATS JetStream distributed streaming system.
 
 ## Usage
 
-FIXME
+To run the full test suite (assuming you have a [Jepsen environment](https://github.com/jepsen-io/jepsen?tab=readme-ov-file#setting-up-a-jepsen-environment)):
+
+```
+lein run test-all
+```
+
+There are a host of options available for controlling fault injection, request rates, concurrency, and so on:
+
+```
+lein run test --help
+```
 
 ## License
 
-Copyright © 2025 FIXME
+Copyright © 2025 Jepsen, LLC
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
